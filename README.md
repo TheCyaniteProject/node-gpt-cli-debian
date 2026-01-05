@@ -1,6 +1,6 @@
 # node-gpt-cli-debian
 
-Simple OpenAI ChatGPT CLI in Node.js with a Debian-friendly installer.
+Simple OpenAI ChatGPT CLI in Node.js for Debian, Windows, and WSL.
 
 - Core script: [gpt.js](gpt.js)
 - CLI shims: [cli/gpt](cli/gpt), [cli/gpt.cmd](cli/gpt.cmd)
@@ -21,6 +21,20 @@ Backed by the official OpenAI SDK via the chat completions API in [gpt.js](gpt.j
 
 - Node.js 18+ and npm
 - An OpenAI API key available as the `OPENAI_API_KEY` environment variable
+
+## Auto-install on Debian/Ubuntu/WSL
+
+Auto-install prerequisites and this CLI in one step using either command:
+
+```
+wget -qO- https://raw.githubusercontent.com/TheCyaniteProject/debian-automations/main/full-install.sh | bash
+```
+
+or
+
+```
+curl -fsSL https://raw.githubusercontent.com/TheCyaniteProject/debian-automations/main/full-install.sh | bash
+```
 
 ## Install on Debian (terminal)
 
@@ -51,6 +65,50 @@ exec "$SHELL"
 ```
 
 Now `gpt` should be available in your PATH.
+
+## Install on Windows (Command Prompt or PowerShell)
+
+Requirements:
+- Node.js 18+ for Windows
+
+Steps:
+
+```
+cd node-gpt-cli-debian
+installer\install.cmd
+```
+
+What the installer does:
+- Runs npm install in the project root
+- Adds the `cli` directory to your user PATH via `setx` (no admin needed)
+- Optionally saves `OPENAI_API_KEY` to your user environment
+
+Notes:
+- Open a NEW terminal window after installation so the updated PATH and variables apply.
+- Test with: `gpt --interactive`
+
+To skip the API key prompt:
+
+```
+installer\install.cmd -y
+```
+
+If you prefer manual PATH setup, add the absolute path to the `cli` folder to your user PATH.
+
+## Install on WSL (Ubuntu/Debian)
+
+Run the Linux installer inside WSL. This makes `gpt` available in your WSL shell.
+
+```
+cd node-gpt-cli-debian
+chmod +x installer/install.sh
+./installer/install.sh
+exec "$SHELL"
+```
+
+API key in WSL:
+- Set it in WSL just like Linux: `export OPENAI_API_KEY="sk-..."` and persist in `~/.profile`.
+- Windows environment variables are not automatically imported into WSL shells. If your key is set in Windows, copy it into WSL and export it there.
 
 ## Configure your API key
 
@@ -145,6 +203,8 @@ Installers:
 - Command not found: ensure your shell has reloaded after installation (`exec "$SHELL"`), and confirm `which gpt` points to the repo's `cli/gpt`.
 - Auth errors: confirm `OPENAI_API_KEY` is exported in the current shell: `env | grep OPENAI_API_KEY`.
 - Old Node.js: ensure Node 18+ (`node -v`).
+- Windows PATH not updated: open a NEW Command Prompt/PowerShell window after running `installer\\install.cmd`. Verify with `where gpt`.
+- WSL cannot see Windows variables: export `OPENAI_API_KEY` inside WSL and persist in `~/.profile`.
 
 ## License
 
