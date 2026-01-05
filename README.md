@@ -3,7 +3,7 @@
 Simple OpenAI ChatGPT CLI in Node.js for Debian, Windows, and WSL.
 
 - Core script: [gpt.js](gpt.js)
-- CLI shims: [cli/gpt](cli/gpt) (bash), [cli/gpt.cmd](cli/gpt.cmd)
+- CLI shims: [cli/gpt](cli/gpt) (bash), [cli/gpt.cmd](cli/gpt.cmd) (Windows)
 - Installers: [installer/install.sh](installer/install.sh), [installer/install.cmd](installer/install.cmd)
 
 ## Features
@@ -38,14 +38,26 @@ curl -fsSL https://raw.githubusercontent.com/TheCyaniteProject/debian-automation
 
 ## Install on Debian (terminal)
 
-1) Install Node.js (recommended: NodeSource repo)
+1) Install Node.js
+
+- Debian/Ubuntu:
 
 ```
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt-get install -y nodejs
+wget -qO- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
 ```
 
-2) Run the installer from the project directory
+or 
+
+```
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+```
+
+```
+nvm install --lts
+nvm use --lts
+```
+
+1) Run the installer from the project directory
 
 ```
 cd node-gpt-cli-debian
@@ -69,7 +81,12 @@ Now `gpt` should be available in your PATH.
 ## Install on Windows (Command Prompt or PowerShell)
 
 Requirements:
-- Node.js 18+ for Windows
+- NVM for Windows (recommended). Install from https://github.com/coreybutler/nvm-windows/releases, then run:
+
+```
+nvm install --lts
+nvm use --lts
+```
 
 Steps:
 
