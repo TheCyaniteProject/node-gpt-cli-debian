@@ -1,2 +1,5 @@
 @echo off
-node ..\gpt.js %*
+setlocal
+set "SCRIPT_DIR=%~dp0"
+node "%SCRIPT_DIR%..\gpt.js" %*
+endlocal

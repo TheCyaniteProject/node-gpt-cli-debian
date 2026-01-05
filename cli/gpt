@@ -1,2 +1,5 @@
 #!/usr/bin/env sh
-node ../gpt.js "$@"
+# Resolve absolute path to this script's directory, then exec Node with absolute path to gpt.js
+set -e
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+exec node "$SCRIPT_DIR/../gpt.js" "$@"
