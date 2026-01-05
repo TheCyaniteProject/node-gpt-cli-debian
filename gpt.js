@@ -4,6 +4,8 @@ import { OpenAI } from "openai";
 import fs from "fs";
 import readline from "readline";
 import path from "path";
+import { fileURLToPath } from "url";
+import { spawn } from "child_process";
 
 const program = new Command();
 const client = new OpenAI();
@@ -22,6 +24,7 @@ program
   .option('-q, --quiet', 'Will not print response')
   .option('-s, --session <project>', 'Save/load chat history to project file')
   .option('-I, --interactive', 'Start interactive chat REPL')
+  .option('--update', 'Run ./installer/update.sh and exit')
   .option('--no-stream', 'Disable streaming output')
   .parse();
 
@@ -39,6 +42,28 @@ if (options.in) {
 }
 
 let chatHistory = [];
+
+// Resolve project directory from current file location
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+function runUpdateAndExit() {
+  const scriptPath = path.join(__dirname, 'installer', 'update.sh');
+  if (!fs.existsSync(scriptPath)) {
+    console.error(`Update script not found at ${scriptPath}`);
+    process.exit(1);
+  }
+
+  const shell = process.platform === 'win32' ? 'bash' : 'bash';
+  const proc = spawn(shell, [scriptPath], { cwd: __dirname, stdio: 'inherit' });
+  proc.on('error', (err) => {
+    console.error(`Failed to launch update script: ${err?.message || err}`);
+    process.exit(1);
+  });
+  proc.on('close', (code) => {
+    process.exit(code ?? 0);
+  });
+}
 
 // Determine session file: enforce .gptp extension and auto-detect in CWD
 function ensureGptpExt(name) {
@@ -173,6 +198,10 @@ async function startInteractive() {
 }
 
 async function main() {
+  if (options.update) {
+    runUpdateAndExit();
+    return; // process will exit in handler
+  }
   const interactiveRequested = options.interactive || (!prompt && process.stdin.isTTY);
   if (interactiveRequested) {
     await startInteractive();

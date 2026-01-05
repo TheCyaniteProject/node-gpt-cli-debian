@@ -18,6 +18,12 @@ if [ -z "$cli_dir" ] || [ ! -d "$cli_dir" ]; then
     exit 1
 fi
 
+# Ensure POSIX shim is executable
+if [ -f "$cli_dir/gpt" ] && [ ! -x "$cli_dir/gpt" ]; then
+    chmod +x "$cli_dir/gpt"
+    echo "Marked $cli_dir/gpt as executable"
+fi
+
 export_line="export PATH=\"$cli_dir:\$PATH\""
 
 if [ "$(id -u)" -eq 0 ]; then
