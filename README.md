@@ -36,7 +36,7 @@ or
 curl -fsSL https://raw.githubusercontent.com/TheCyaniteProject/debian-automations/main/full-install.sh | bash
 ```
 
-## Install on Debian (terminal)
+## Install on Debian (manual)
 
 1) Install Node.js
 
