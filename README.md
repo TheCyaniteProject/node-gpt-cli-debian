@@ -3,7 +3,7 @@
 Simple OpenAI ChatGPT CLI in Node.js for Debian, Windows, and WSL.
 
 - Core script: [gpt.js](gpt.js)
-- CLI shims: [cli/gpt](cli/gpt), [cli/gpt.cmd](cli/gpt.cmd)
+- CLI shims: [cli/gpt](cli/gpt) (bash), [cli/gpt.cmd](cli/gpt.cmd)
 - Installers: [installer/install.sh](installer/install.sh), [installer/install.cmd](installer/install.cmd)
 
 ## Features
