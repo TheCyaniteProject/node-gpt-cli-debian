@@ -53,13 +53,25 @@ else
 fi
 
 # Optionally set OPENAI_API_KEY permanently
-# If first argument is -y, skip prompting entirely (non-interactive convenience)
-if [ "${1:-}" = "-y" ]; then
-    echo "Skipping OPENAI_API_KEY prompt (-y provided)"
+# Controls:
+#   - First argument "-y" or env SKIP_API_PROMPT=1: skip prompting entirely
+if [ "${1:-}" = "-y" ] || [ "${SKIP_API_PROMPT:-0}" = "1" ]; then
+    echo "Skipping OPENAI_API_KEY prompt (-y/SKIP_API_PROMPT provided)"
 else
     echo
-    printf "Enter OPENAI_API_KEY (leave blank or type -y to skip): "
-    IFS= read -r OPENAI_API_KEY_INPUT || true
+    prompt_msg="Enter OPENAI_API_KEY (leave blank or type -y to skip): "
+
+    # Prefer the controlling TTY so this works even when stdin is a pipe (e.g., wget ... | bash)
+    if [ -r "/dev/tty" ] && [ -w "/dev/tty" ]; then
+        printf "%s" "$prompt_msg" > /dev/tty
+        IFS= read -r OPENAI_API_KEY_INPUT < /dev/tty || OPENAI_API_KEY_INPUT=""
+    elif [ -t 0 ]; then
+        printf "%s" "$prompt_msg"
+        IFS= read -r OPENAI_API_KEY_INPUT || OPENAI_API_KEY_INPUT=""
+    else
+        echo "No interactive terminal available; skipping OPENAI_API_KEY configuration (pass -y to skip or set OPENAI_API_KEY environment)" >&2
+        OPENAI_API_KEY_INPUT=""
+    fi
 
     if [ -n "${OPENAI_API_KEY_INPUT:-}" ] && [ "${OPENAI_API_KEY_INPUT}" != "-y" ]; then
         # Sanitize single quotes for safe single-quoted export
