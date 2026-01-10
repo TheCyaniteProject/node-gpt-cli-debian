@@ -81,6 +81,9 @@ if (options.in) {
 
 let chatHistory = [];
 let todoList = [];
+let debugEnabled = false;
+let logging = { enabled: false, file: path.join(process.cwd(), 'gpt-tools.log') };
+let diffPreview = { enabled: true, thresholdLines: 0, maxLines: 400 };
 
 // Resolve project directory from current file location
 const __filename = fileURLToPath(import.meta.url);
@@ -141,6 +144,14 @@ if (sessionFile && fs.existsSync(sessionFile)) {
     } else if (parsed && typeof parsed === 'object') {
       chatHistory = Array.isArray(parsed.chatHistory) ? parsed.chatHistory : [];
       todoList = Array.isArray(parsed.todoList) ? parsed.todoList : [];
+      if (parsed.diffPreview && typeof parsed.diffPreview === 'object') {
+        // Merge to preserve new defaults if older session lacks fields
+        diffPreview = {
+          enabled: typeof parsed.diffPreview.enabled === 'boolean' ? parsed.diffPreview.enabled : diffPreview.enabled,
+          thresholdLines: Number.isInteger(parsed.diffPreview.thresholdLines) ? parsed.diffPreview.thresholdLines : diffPreview.thresholdLines,
+          maxLines: Number.isInteger(parsed.diffPreview.maxLines) ? parsed.diffPreview.maxLines : diffPreview.maxLines,
+        };
+      }
     }
   } catch (e) {
     // If error reading session, start fresh
@@ -151,7 +162,7 @@ if (sessionFile && fs.existsSync(sessionFile)) {
 
 async function saveSession() {
   if (sessionFile) {
-    const payload = { chatHistory, todoList };
+    const payload = { chatHistory, todoList, diffPreview };
     fs.writeFileSync(sessionFile, JSON.stringify(payload, null, 2));
   }
 }
@@ -242,10 +253,92 @@ async function startInteractive() {
     chatHistory.push({ role: 'system', content: options.role });
   }
 
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+  function pathCompleter(fragment) {
+    try {
+      const base = fragment.endsWith('/') ? fragment : path.dirname(fragment);
+      const dir = base === '.' || base === '' || base === '/' ? process.cwd() : path.resolve(process.cwd(), base);
+      const prefix = fragment.endsWith('/') ? '' : path.basename(fragment);
+      const entries = fs.readdirSync(dir, { withFileTypes: true }).map(e => e.name + (e.isDirectory() ? '/' : ''));
+      return entries
+        .filter(name => name.toLowerCase().startsWith(prefix.toLowerCase()))
+        .map(name => (base && base !== '.' && base !== '/' ? path.join(base, name) : name));
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function completer(line) {
+    const commands = [
+      '/help','/exit','/save','/todo','/perms','/log','/debug','/model','/retry','/edit','/reset','/clear','/diff'
+    ];
+    const todoSubs = ['list','add','update','complete','delete'];
+    const permsSubs = ['list','clear'];
+    const logSubs = ['on','off','set'];
+    const debugSubs = ['on','off'];
+    const modelSubs = ['set','temp','maxtokens','systemmsg','systemclear'];
+    const diffSubs = ['on','off','threshold','maxlines'];
+
+    // File path completions for /save and /log set
+    if (line.startsWith('/save ')) {
+      const frag = line.slice(6);
+      const hits = pathCompleter(frag);
+      return [hits.length ? hits : [], line];
+    }
+    if (line.startsWith('/log set ')) {
+      const frag = line.slice(9);
+      const hits = pathCompleter(frag);
+      return [hits.length ? hits : [], line];
+    }
+
+    if (line.startsWith('/todo ')) {
+      const after = line.slice(6);
+      const hits = todoSubs.filter(s => s.startsWith(after));
+      return [hits.length ? hits.map(h => `/todo ${h}`) : [], line];
+    }
+    if (line.startsWith('/perms ')) {
+      const after = line.slice(7);
+      const hits = permsSubs.filter(s => s.startsWith(after));
+      return [hits.length ? hits.map(h => `/perms ${h}`) : [], line];
+    }
+    if (line.startsWith('/log ')) {
+      const after = line.slice(5);
+      const hits = logSubs.filter(s => s.startsWith(after));
+      return [hits.length ? hits.map(h => `/log ${h}`) : [], line];
+    }
+    if (line.startsWith('/debug ')) {
+      const after = line.slice(7);
+      const hits = debugSubs.filter(s => s.startsWith(after));
+      return [hits.length ? hits.map(h => `/debug ${h}`) : [], line];
+    }
+    if (line.startsWith('/model ')) {
+      const after = line.slice(7);
+      const hits = modelSubs.filter(s => s.startsWith(after));
+      return [hits.length ? hits.map(h => `/model ${h}`) : [], line];
+    }
+    if (line.startsWith('/diff ')) {
+      const after = line.slice(6);
+      const hits = diffSubs.filter(s => s.startsWith(after));
+      return [hits.length ? hits.map(h => `/diff ${h}`) : [], line];
+    }
+
+    const hits = commands.filter(c => c.startsWith(line));
+    return [hits.length ? hits : [], line];
+  }
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true, completer });
   const ask = (q) => new Promise((resolve) => rl.question(q, resolve));
   console.log('Interactive mode. Type /help for commands.');
   console.log(`Session file: ${sessionFile || 'N/A'}`);
+
+  // Lazy-load diff library for preview; disable preview if unavailable
+  let createTwoFilesPatchFn = null;
+  try {
+    const mod = await import('diff');
+    createTwoFilesPatchFn = mod.createTwoFilesPatch;
+  } catch (_) {
+    // Best-effort: if missing, keep running without preview
+    diffPreview.enabled = false;
+  }
 
   // Define tool specifications for function calling
   const toolDefinitions = [
@@ -392,6 +485,55 @@ async function startInteractive() {
     }
   ];
 
+  function logLine(line) {
+    if (!logging.enabled) return;
+    try {
+      fs.appendFileSync(logging.file, `[${new Date().toISOString()}] ${line}\n`);
+    } catch (_) {}
+  }
+
+  function colorizePatch(patch) {
+    const reset = '\x1b[0m';
+    const green = '\x1b[32m';
+    const red = '\x1b[31m';
+    const cyan = '\x1b[36m';
+    const dim = '\x1b[2m';
+    return patch.split('\n').map(line => {
+      if (line.startsWith('+++') || line.startsWith('---')) return dim + line + reset;
+      if (line.startsWith('@@')) return cyan + line + reset;
+      if (line.startsWith('+') && !line.startsWith('+++')) return green + line + reset;
+      if (line.startsWith('-') && !line.startsWith('---')) return red + line + reset;
+      return line;
+    }).join('\n');
+  }
+
+  async function maybePreviewAndConfirmDiff(filePath, before, after) {
+    // Estimate changed lines
+    const A = String(before ?? '').split('\n');
+    const B = String(after ?? '').split('\n');
+    const maxLen = Math.max(A.length, B.length);
+    let changed = 0;
+    for (let i = 0; i < maxLen; i++) if (A[i] !== B[i]) changed++;
+
+    if (!diffPreview.enabled || changed < diffPreview.thresholdLines || !createTwoFilesPatchFn) {
+      return { proceed: true, changed };
+    }
+    const patch = createTwoFilesPatchFn(filePath, filePath, String(before ?? ''), String(after ?? ''), '', '');
+    const lines = patch.split('\n');
+    const head = lines.slice(0, diffPreview.maxLines);
+    const truncated = lines.length > diffPreview.maxLines;
+    const preview = colorizePatch(head.join('\n')) + (truncated ? `\n[Diff truncated to ${diffPreview.maxLines} line(s)]` : '');
+    console.log(preview);
+    const ok = await askYesNo(`Apply these changes to ${filePath}?`);
+    if (!ok) {
+      console.log('[Change aborted]');
+      logLine(`DIFF_ABORT path=${filePath} changedLines=${changed}`);
+      return { proceed: false, changed };
+    }
+    logLine(`DIFF_APPLY path=${filePath} changedLines=${changed}`);
+    return { proceed: true, changed };
+  }
+
   async function askYesNo(promptText) {
     while (true) {
       const ans = (await ask(`${promptText} [y/n]: `)).trim().toLowerCase();
@@ -424,6 +566,8 @@ async function startInteractive() {
           const cmd = args?.command || '';
           const ok = await askYesNo(`ChatGPT would like to run: ${cmd}`);
           if (!ok) return JSON.stringify({ error: 'Permission denied by user.' });
+          if (debugEnabled) console.log(`[Tool call] run_command ${JSON.stringify({ command: cmd, timeoutMs: args?.timeoutMs ?? undefined })}`);
+          logLine(`CALL run_command args=${JSON.stringify({ command: cmd, timeoutMs: args?.timeoutMs ?? undefined })}`);
           return await new Promise((resolve) => {
             const child = spawn(cmd, { shell: true, cwd: process.cwd() });
             let stdout = '';
@@ -440,10 +584,16 @@ async function startInteractive() {
             child.on('close', (code) => {
               if (timer) clearTimeout(timer);
               console.log(`[Ran command (exit ${code ?? 'null'})]`);
+              if (debugEnabled) {
+                if (stdout) console.log(`[stdout]\n${stdout}`);
+                if (stderr) console.log(`[stderr]\n${stderr}`);
+              }
+              logLine(`RESULT run_command exit=${code} stdout_len=${stdout.length} stderr_len=${stderr.length}`);
               resolve(JSON.stringify({ exitCode: code, stdout, stderr }));
             });
             child.on('error', (e) => {
               if (timer) clearTimeout(timer);
+              logLine(`ERROR run_command ${e?.message || String(e)}`);
               resolve(JSON.stringify({ exitCode: null, error: e?.message || String(e) }));
             });
           });
@@ -466,6 +616,9 @@ async function startInteractive() {
           }
           walk(process.cwd());
           console.log(`[Found ${results.length} file(s) matching "${q}"]`);
+          if (debugEnabled) console.log(`[Tool call] search_files ${JSON.stringify({ query: q, maxResults: max })}`);
+          logLine(`CALL search_files args=${JSON.stringify({ query: q, maxResults: max })}`);
+          logLine(`RESULT search_files count=${results.length}`);
           return JSON.stringify({ results });
         }
         case 'path_exists': {
@@ -473,9 +626,12 @@ async function startInteractive() {
           try {
             const st = fs.statSync(p);
             console.log(`[Path exists: ${p} (${st.isDirectory() ? 'dir' : 'file'})]`);
+            if (debugEnabled) console.log(`[Tool call] path_exists ${JSON.stringify({ targetPath: p })}`);
+            logLine(`CALL path_exists args=${JSON.stringify({ targetPath: p })}`);
             return JSON.stringify({ exists: true, isDirectory: st.isDirectory(), isFile: st.isFile(), path: p });
           } catch (_) {
             console.log(`[Path not found: ${p}]`);
+            logLine(`CALL path_exists args=${JSON.stringify({ targetPath: p })}`);
             return JSON.stringify({ exists: false, path: p });
           }
         }
@@ -488,6 +644,9 @@ async function startInteractive() {
               return o;
             });
             console.log(`[Listed directory: ${p} (${items.length} entries)]`);
+            if (debugEnabled) console.log(`[Tool call] read_dir ${JSON.stringify({ dirPath: p, includeTypes: !!args?.includeTypes })}`);
+            logLine(`CALL read_dir args=${JSON.stringify({ dirPath: p, includeTypes: !!args?.includeTypes })}`);
+            logLine(`RESULT read_dir count=${items.length}`);
             return JSON.stringify({ path: p, items });
           } catch (e) {
             return JSON.stringify({ error: e?.message || String(e), path: p });
@@ -502,6 +661,8 @@ async function startInteractive() {
             if (!ok) return JSON.stringify({ error: 'Permission denied by user.' });
             grantPerm('read', p);
           }
+          if (debugEnabled) console.log(`[Tool call] read_file ${JSON.stringify({ filePath: p, maxBytes: args?.maxBytes ?? undefined })}`);
+          logLine(`CALL read_file args=${JSON.stringify({ filePath: p, maxBytes: args?.maxBytes ?? undefined })}`);
           try {
             const max = Math.min(Math.max(Number(args?.maxBytes) || 200000, 1), 200000);
             const fd = fs.openSync(p, 'r');
@@ -511,8 +672,10 @@ async function startInteractive() {
             const content = buf.slice(0, bytes).toString('utf8');
             const total = fs.statSync(p).size;
             console.log(`[Read ${bytes}/${total} bytes from ${p}${total > bytes ? ' (truncated)' : ''}]`);
+            logLine(`RESULT read_file bytes=${bytes} total=${total}`);
             return JSON.stringify({ path: p, content, truncated: total > bytes, bytesRead: bytes });
           } catch (e) {
+            logLine(`ERROR read_file ${e?.message || String(e)}`);
             return JSON.stringify({ error: e?.message || String(e), path: p });
           }
         }
@@ -525,13 +688,19 @@ async function startInteractive() {
             if (!ok) return JSON.stringify({ error: 'Permission denied by user.' });
             grantPerm('write', p);
           }
+          if (debugEnabled) console.log(`[Tool call] write_file ${JSON.stringify({ filePath: p, contentBytes: (args?.content || '').length })}`);
+          logLine(`CALL write_file args=${JSON.stringify({ filePath: p, contentBytes: (args?.content || '').length })}`);
           try {
             let before = '';
             let existed = false;
             try { before = fs.readFileSync(p, 'utf8'); existed = true; } catch(_) {}
-            fs.mkdirSync(path.dirname(p), { recursive: true });
-            fs.writeFileSync(p, String(args?.content || ''), 'utf8');
             const after = String(args?.content || '');
+            if (existed) {
+              const decision = await maybePreviewAndConfirmDiff(p, before, after);
+              if (!decision.proceed) return JSON.stringify({ path: p, ok: false, aborted: true });
+            }
+            fs.mkdirSync(path.dirname(p), { recursive: true });
+            fs.writeFileSync(p, after, 'utf8');
             if (existed) {
               const changed = countChangedLines(before, after);
               console.log(`[Changed ${changed} line(s) of text in ${p}]`);
@@ -539,8 +708,10 @@ async function startInteractive() {
               const lines = String(after).split('\n').length;
               console.log(`[Created ${p} with ${lines} line(s)]`);
             }
+            logLine(`RESULT write_file ok=true`);
             return JSON.stringify({ path: p, ok: true });
           } catch (e) {
+            logLine(`ERROR write_file ${e?.message || String(e)}`);
             return JSON.stringify({ error: e?.message || String(e), path: p });
           }
         }
@@ -553,6 +724,8 @@ async function startInteractive() {
             if (!ok) return JSON.stringify({ error: 'Permission denied by user.' });
             grantPerm('write', p);
           }
+          if (debugEnabled) console.log(`[Tool call] patch_file ${JSON.stringify({ filePath: p, operations: Array.isArray(args?.operations) ? args.operations.length : 0 })}`);
+          logLine(`CALL patch_file args=${JSON.stringify({ filePath: p, operations: Array.isArray(args?.operations) ? args.operations.length : 0 })}`);
           try {
             if (!fs.existsSync(p)) return JSON.stringify({ error: 'File does not exist', path: p });
             let content = fs.readFileSync(p, 'utf8');
@@ -601,14 +774,16 @@ async function startInteractive() {
               }
             };
 
-            const beforeBytes = Buffer.byteLength(content, 'utf8');
             applyOps();
-            const afterBytes = Buffer.byteLength(content, 'utf8');
+            const decision = await maybePreviewAndConfirmDiff(p, original, content);
+            if (!decision.proceed) return JSON.stringify({ path: p, ok: false, aborted: true });
             fs.writeFileSync(p, content, 'utf8');
             const changed = countChangedLines(original, content);
             console.log(`[Changed ${changed} line(s) of text in ${p}]`);
-            return JSON.stringify({ path: p, ok: true, bytes: afterBytes, deltaBytes: afterBytes - beforeBytes, changedLines: changed });
+            logLine(`RESULT patch_file changedLines=${changed}`);
+            return JSON.stringify({ path: p, ok: true, changedLines: changed });
           } catch (e) {
+            logLine(`ERROR patch_file ${e?.message || String(e)}`);
             return JSON.stringify({ error: e?.message || String(e), path: p });
           }
         }
@@ -620,6 +795,7 @@ async function startInteractive() {
             todoList.push(item);
             if (todoList.length === 1) console.log('[Created TODO List]');
             console.log('[Added 1 item to TODO List]');
+            await saveSession();
             return JSON.stringify({ ok: true, item });
           }
           if (action === 'list') {
@@ -633,6 +809,7 @@ async function startInteractive() {
             if (args?.title != null) it.title = String(args.title);
             if (args?.description != null) it.description = String(args.description);
             console.log(`[Updated TODO item #${id}]`);
+            await saveSession();
             return JSON.stringify({ ok: true, item: it });
           }
           if (action === 'complete') {
@@ -641,6 +818,7 @@ async function startInteractive() {
             if (!it) return JSON.stringify({ error: 'Not found' });
             it.status = 'completed';
             console.log('[Marked 1 TODO List item as completed]');
+            await saveSession();
             return JSON.stringify({ ok: true, item: it });
           }
           if (action === 'delete') {
@@ -649,6 +827,7 @@ async function startInteractive() {
             if (idx === -1) return JSON.stringify({ error: 'Not found' });
             const [removed] = todoList.splice(idx, 1);
             console.log('[Deleted 1 TODO List item]');
+            await saveSession();
             return JSON.stringify({ ok: true, removed });
           }
           return JSON.stringify({ error: 'Unsupported action' });
@@ -661,11 +840,7 @@ async function startInteractive() {
     }
   }
 
-  async function agenticExchange(userInput) {
-    // Add the prompt to chat history
-    chatHistory.push({ role: 'user', content: buildUserContent(userInput) });
-
-    // Loop handling tool calls until assistant provides final content
+  async function runModelWithTools() {
     for (let step = 0; step < 20; step++) {
       const completion = await client.chat.completions.create({
         model: options.model,
@@ -679,10 +854,15 @@ async function startInteractive() {
       const toolCalls = msg.tool_calls || [];
 
       if (toolCalls.length > 0) {
-        // Record assistant tool call message
-        chatHistory.push({ role: 'assistant', content: msg.content || null, tool_calls: toolCalls });
-
+        if (debugEnabled) {
+          for (const tc of toolCalls) {
+            console.log(`[Model requested tool] ${tc.function?.name} ${tc.function?.arguments || ''}`);
+          }
+        }
         for (const tc of toolCalls) {
+          // Record assistant tool call message
+          chatHistory.push({ role: 'assistant', content: msg.content || null, tool_calls: [tc] });
+          logLine(`TOOL_REQUEST name=${tc.function?.name} args=${tc.function?.arguments || ''}`);
           let args = {};
           try { args = JSON.parse(tc.function?.arguments || '{}'); } catch(_) { args = {}; }
           const result = await runLocalTool(tc.function?.name, args);
@@ -700,6 +880,12 @@ async function startInteractive() {
       break;
     }
   }
+
+  async function agenticExchange(userInput) {
+    // Add the prompt to chat history
+    chatHistory.push({ role: 'user', content: buildUserContent(userInput) });
+    await runModelWithTools();
+  }
   while (true) {
     const input = await ask('> ');
     if (!input) continue;
@@ -708,6 +894,15 @@ async function startInteractive() {
       console.log('  /help                Show this help menu');
       console.log('  /exit                Exit interactive mode');
       console.log('  /save <filename>     Save session history and set as active session');
+      console.log('  /perms [list|clear]  View or clear cached file permissions');
+      console.log('  /log [on|off|set <file>]  Log tool calls and args to file');
+      console.log('  /debug [on|off]      Print tool calls and command outputs');
+      console.log('  /model [set <id>|temp <n>|maxtokens <n>|systemmsg <text>|systemclear]');
+      console.log('  /retry               Retry the last assistant response');
+      console.log('  /edit                Edit last user message and resend');
+      console.log('  /reset               Clear permissions and tool state');
+      console.log('  /clear [all]         Clear chat history (and todos with all)');
+      console.log('  /diff [on|off|threshold <n>|maxlines <n>]  Configure diff preview');
       console.log('  /todo list           Show TODO items');
       console.log('  /todo add <title> [| <desc>]');
       console.log('  /todo update <id> <title> [| <desc>]');
@@ -797,6 +992,156 @@ async function startInteractive() {
         await saveSession();
         console.log(`Session file: ${sessionFile}`);
       }
+      continue;
+    }
+    if (input.trim().startsWith('/perms')) {
+      const parts = input.trim().split(/\s+/);
+      const sub = parts[1] || '';
+      const cache = (runLocalTool._permCache ||= { read: new Set(), write: new Set() });
+      if (sub === 'list' || sub === '') {
+        const read = Array.from(cache.read);
+        const write = Array.from(cache.write);
+        console.log('[Permissions]');
+        console.log(`  read (${read.length})`);
+        for (const p of read) console.log(`   - ${p}`);
+        console.log(`  write (${write.length})`);
+        for (const p of write) console.log(`   - ${p}`);
+      } else if (sub === 'clear') {
+        cache.read.clear();
+        cache.write.clear();
+        console.log('[Cleared cached permissions]');
+      } else {
+        console.error('Usage: /perms [list|clear]');
+      }
+      continue;
+    }
+    if (input.trim().startsWith('/log')) {
+      const parts = input.trim().split(/\s+/);
+      const sub = parts[1] || '';
+      if (sub === 'on') {
+        logging.enabled = true;
+        console.log(`[Logging enabled -> ${logging.file}]`);
+      } else if (sub === 'off') {
+        logging.enabled = false;
+        console.log('[Logging disabled]');
+      } else if (sub === 'set') {
+        const fname = parts[2];
+        if (!fname) { console.log('Usage: /log set <filename>'); }
+        else { logging.file = fname; console.log(`[Log file set -> ${logging.file}]`); }
+      } else if (sub === '') {
+        console.log(`[Logging ${logging.enabled ? 'on' : 'off'} -> ${logging.file}]`);
+      } else {
+        console.log('Usage: /log [on|off|set <filename>]');
+      }
+      continue;
+    }
+    if (input.trim().startsWith('/diff')) {
+      const parts = input.trim().split(/\s+/);
+      const sub = parts[1] || '';
+      if (!sub) {
+        console.log(`[Diff preview ${diffPreview.enabled ? 'on' : 'off'}] threshold=${diffPreview.thresholdLines} maxLines=${diffPreview.maxLines}`);
+      } else if (sub === 'on') {
+        diffPreview.enabled = true;
+        console.log('[Diff preview on]');
+        await saveSession();
+      } else if (sub === 'off') {
+        diffPreview.enabled = false;
+        console.log('[Diff preview off]');
+        await saveSession();
+      } else if (sub === 'threshold') {
+        const n = parseInt(parts[2], 10);
+        if (!Number.isInteger(n) || n < 0) console.log('Usage: /diff threshold <n>');
+        else { diffPreview.thresholdLines = n; console.log(`[Diff threshold -> ${n}]`); await saveSession(); }
+      } else if (sub === 'maxlines') {
+        const n = parseInt(parts[2], 10);
+        if (!Number.isInteger(n) || n < 10) console.log('Usage: /diff maxlines <n> (>=10)');
+        else { diffPreview.maxLines = n; console.log(`[Diff max lines -> ${n}]`); await saveSession(); }
+      } else {
+        console.log('Usage: /diff [on|off|threshold <n>|maxlines <n>]');
+      }
+      continue;
+    }
+    if (input.trim().startsWith('/debug')) {
+      const parts = input.trim().split(/\s+/);
+      const sub = parts[1] || '';
+      if (sub === 'on') { debugEnabled = true; console.log('[Debug on]'); }
+      else if (sub === 'off') { debugEnabled = false; console.log('[Debug off]'); }
+      else { console.log(`[Debug ${debugEnabled ? 'on' : 'off'}]`); }
+      continue;
+    }
+    if (input.trim().startsWith('/model')) {
+      const raw = input.trim();
+      const parts = raw.split(/\s+/);
+      const sub = parts[1];
+      if (!sub) {
+        const sys = chatHistory.find(m => m.role === 'system');
+        console.log(`[Model=${options.model}] [temp=${typeof options.temperature === 'number' ? options.temperature : 'default'}] [maxTokens=${typeof options.maxTokens === 'number' ? options.maxTokens : 'default'}]`);
+        console.log(`System: ${sys ? (sys.content || '').slice(0, 120) + ((sys.content || '').length > 120 ? '…' : '') : '(none)'}`);
+      } else if (sub === 'set') {
+        const id = parts[2];
+        if (!id) console.log('Usage: /model set <id>');
+        else { options.model = id; console.log(`[Model set -> ${id}]`); }
+      } else if (sub === 'temp') {
+        const v = parseFloat(parts[2]);
+        if (Number.isNaN(v)) console.log('Usage: /model temp <number>');
+        else { options.temperature = v; console.log(`[Temperature -> ${v}]`); }
+      } else if (sub === 'maxtokens') {
+        const v = parseInt(parts[2], 10);
+        if (Number.isNaN(v)) console.log('Usage: /model maxtokens <number>');
+        else { options.maxTokens = v; console.log(`[Max tokens -> ${v}]`); }
+      } else if (sub === 'systemmsg') {
+        const text = raw.replace(/^\/model\s+systemmsg\s*/, '');
+        const idx = chatHistory.findIndex(m => m.role === 'system');
+        if (idx >= 0) chatHistory[idx].content = text;
+        else chatHistory.unshift({ role: 'system', content: text });
+        await saveSession();
+        console.log('[System message set]');
+      } else if (sub === 'systemclear') {
+        chatHistory = chatHistory.filter(m => m.role !== 'system');
+        await saveSession();
+        console.log('[System message cleared]');
+      } else {
+        console.log('Usage: /model [set <id>|temp <n>|maxtokens <n>|systemmsg <text>|systemclear]');
+      }
+      continue;
+    }
+    if (input.trim() === '/retry') {
+      // Remove last assistant message if present
+      for (let i = chatHistory.length - 1; i >= 0; i--) {
+        if (chatHistory[i].role === 'assistant') { chatHistory.splice(i, 1); break; }
+      }
+      await runModelWithTools();
+      continue;
+    }
+    if (input.trim() === '/edit') {
+      // Edit last user message, drop messages after it, then re-run
+      let lastUserIndex = -1;
+      for (let i = chatHistory.length - 1; i >= 0; i--) {
+        if (chatHistory[i].role === 'user') { lastUserIndex = i; break; }
+      }
+      if (lastUserIndex === -1) { console.error('No user message to edit.'); continue; }
+      const newMsg = await ask('New message: ');
+      chatHistory = chatHistory.slice(0, lastUserIndex + 1);
+      chatHistory[lastUserIndex].content = buildUserContent(newMsg);
+      await runModelWithTools();
+      continue;
+    }
+    if (input.trim() === '/reset') {
+      const cache = (runLocalTool._permCache ||= { read: new Set(), write: new Set() });
+      cache.read.clear();
+      cache.write.clear();
+      debugEnabled = false;
+      logging.enabled = false;
+      console.log('[Reset tool state and permissions]');
+      continue;
+    }
+    if (input.trim().startsWith('/clear')) {
+      const parts = input.trim().split(/\s+/);
+      const all = parts[1] === 'all';
+      chatHistory = chatHistory.filter(m => m.role === 'system');
+      if (all) { todoList = []; }
+      await saveSession();
+      console.log(all ? '[Cleared chat and TODO list]' : '[Cleared chat history]');
       continue;
     }
     if (input.trim() === '/exit') break;
