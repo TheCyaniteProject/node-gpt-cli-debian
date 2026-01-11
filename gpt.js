@@ -269,7 +269,7 @@ async function startInteractive() {
 
   function completer(line) {
     const commands = [
-      '/help','/exit','/save','/todo','/perms','/log','/debug','/model','/retry','/edit','/reset','/clear','/diff'
+      '/help','/exit','/save','/todo','/perms','/log','/debug','/model','/retry','/edit','/reset','/restart','/clear','/diff'
     ];
     const todoSubs = ['list','add','update','complete','delete'];
     const permsSubs = ['list','clear'];
@@ -841,6 +841,8 @@ async function startInteractive() {
   }
 
   async function runModelWithTools() {
+    // Note: caller may attach an AbortController through arguments via binding/closure
+    const controller = runModelWithTools._controller;
     for (let step = 0; step < 20; step++) {
       const completion = await client.chat.completions.create({
         model: options.model,
@@ -848,7 +850,7 @@ async function startInteractive() {
         tools: toolDefinitions,
         temperature: typeof options.temperature === 'number' && !Number.isNaN(options.temperature) ? options.temperature : undefined,
         max_tokens: typeof options.maxTokens === 'number' && !Number.isNaN(options.maxTokens) ? options.maxTokens : undefined,
-      });
+      }, controller ? { signal: controller.signal } : undefined);
 
       const msg = completion.choices?.[0]?.message || {};
       const toolCalls = msg.tool_calls || [];
@@ -884,7 +886,40 @@ async function startInteractive() {
   async function agenticExchange(userInput) {
     // Add the prompt to chat history
     chatHistory.push({ role: 'user', content: buildUserContent(userInput) });
-    await runModelWithTools();
+    // Set up cancel-on-keypress (F/f)
+    const controller = new AbortController();
+    runModelWithTools._controller = controller;
+    let prevRaw = undefined;
+    const onData = (buf) => {
+      const s = buf.toString();
+      const ch = s.length ? s[0] : '';
+      if (ch === 'f' || ch === 'F') {
+        try { controller.abort(); } catch(_) {}
+      }
+    };
+    try {
+      // Put stdin into raw mode to capture single key presses during generation
+      if (process.stdin.isTTY) {
+        prevRaw = process.stdin.isRaw;
+        try { process.stdin.setRawMode(true); } catch(_) {}
+        process.stdin.on('data', onData);
+      }
+      console.log('[Press F to cancel]');
+      await runModelWithTools();
+    } catch (e) {
+      const msg = (e?.name || '').toString();
+      if (msg === 'AbortError' || /aborted|abort/i.test(e?.message || '')) {
+        console.log('[Cancelled]');
+      } else {
+        throw e;
+      }
+    } finally {
+      runModelWithTools._controller = null;
+      if (process.stdin.isTTY) {
+        process.stdin.off('data', onData);
+        try { process.stdin.setRawMode(!!prevRaw); } catch(_) {}
+      }
+    }
   }
   while (true) {
     const input = await ask('> ');
@@ -900,9 +935,11 @@ async function startInteractive() {
       console.log('  /model [set <id>|temp <n>|maxtokens <n>|systemmsg <text>|systemclear]');
       console.log('  /retry               Retry the last assistant response');
       console.log('  /edit                Edit last user message and resend');
-      console.log('  /reset               Clear permissions and tool state');
-      console.log('  /clear [all]         Clear chat history (and todos with all)');
+      console.log('  /reset               Clear chat history and tool state');
+      console.log('  /restart             Clear screen, tool state, and permissions');
+      console.log('  /clear               Clear the screen');
       console.log('  /diff [on|off|threshold <n>|maxlines <n>]  Configure diff preview');
+      console.log('Tips: Press F during a model response to cancel.');
       console.log('  /todo list           Show TODO items');
       console.log('  /todo add <title> [| <desc>]');
       console.log('  /todo update <id> <title> [| <desc>]');
@@ -1127,21 +1164,33 @@ async function startInteractive() {
       continue;
     }
     if (input.trim() === '/reset') {
+      // Clear chat history (preserve system message) and tool state
+      chatHistory = chatHistory.filter(m => m.role === 'system');
       const cache = (runLocalTool._permCache ||= { read: new Set(), write: new Set() });
       cache.read.clear();
       cache.write.clear();
       debugEnabled = false;
       logging.enabled = false;
-      console.log('[Reset tool state and permissions]');
+      await saveSession();
+      console.log('[Reset: cleared chat history and tool state]');
       continue;
     }
-    if (input.trim().startsWith('/clear')) {
-      const parts = input.trim().split(/\s+/);
-      const all = parts[1] === 'all';
-      chatHistory = chatHistory.filter(m => m.role === 'system');
-      if (all) { todoList = []; }
-      await saveSession();
-      console.log(all ? '[Cleared chat and TODO list]' : '[Cleared chat history]');
+    if (input.trim() === '/restart') {
+      // Clear screen, tool state, and permissions (do not modify chat history)
+      if (typeof console.clear === 'function') console.clear();
+      else process.stdout.write('\x1b[2J\x1b[H');
+      const cache = (runLocalTool._permCache ||= { read: new Set(), write: new Set() });
+      cache.read.clear();
+      cache.write.clear();
+      debugEnabled = false;
+      logging.enabled = false;
+      console.log('[Restarted: cleared screen and tool state]');
+      continue;
+    }
+    if (input.trim() === '/clear') {
+      // Clear the terminal screen
+      if (typeof console.clear === 'function') console.clear();
+      else process.stdout.write('\x1b[2J\x1b[H');
       continue;
     }
     if (input.trim() === '/exit') break;
