@@ -4,6 +4,40 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd "$script_dir/.." && pwd)"
 
+# Parse arguments
+# Supported:
+#   -y                    -> skip API key prompt entirely
+#   --api-key <key>       -> set OPENAI_API_KEY without prompting
+#   --api-key=<key>       -> same as above
+API_KEY_ARG=""
+if [ "$#" -gt 0 ]; then
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -y)
+                SKIP_API_PROMPT=1
+                shift
+                ;;
+            --api-key=*)
+                API_KEY_ARG="${1#*=}"
+                shift
+                ;;
+            --api-key)
+                shift
+                if [ "$#" -eq 0 ]; then
+                    echo "Error: --api-key requires a value" >&2
+                    exit 2
+                fi
+                API_KEY_ARG="$1"
+                shift
+                ;;
+            *)
+                # Ignore unknown args for now
+                shift
+                ;;
+        esac
+    done
+fi
+
 if command -v npm >/dev/null 2>&1; then
     echo "Running npm install in $project_dir"
     (cd "$project_dir" && npm install --no-audit --no-fund)
@@ -54,8 +88,44 @@ fi
 
 # Optionally set OPENAI_API_KEY permanently
 # Controls:
-#   - First argument "-y" or env SKIP_API_PROMPT=1: skip prompting entirely
-if [ "${1:-}" = "-y" ] || [ "${SKIP_API_PROMPT:-0}" = "1" ]; then
+#   - -y or env SKIP_API_PROMPT=1: skip prompting entirely (do not set key)
+#   - --api-key <key>: set key without prompting
+if [ -n "${API_KEY_ARG:-}" ]; then
+    # Sanitize single quotes for safe single-quoted export
+    sanitized_key=$(printf "%s" "$API_KEY_ARG" | sed "s/'/'\"'\"'/g")
+    key_line="export OPENAI_API_KEY='${sanitized_key}'"
+
+    # Ensure target is set from the PATH section above; then write/update key there
+    if [ -z "${target:-}" ]; then
+        # Fallback selection (should not happen, but be safe)
+        if [ "$(id -u)" -eq 0 ]; then
+            target="/etc/profile.d/node-gpt-cli.sh"
+        else
+            if [ -f "$HOME/.profile" ]; then
+                target="$HOME/.profile"
+            else
+                target="$HOME/.bash_profile"
+            fi
+        fi
+    fi
+
+    # Make sure the file exists before editing/appending
+    touch "$target"
+
+    if grep -q '^export OPENAI_API_KEY=' "$target" >/dev/null 2>&1; then
+        # Replace existing definition
+        sed -i "s|^export OPENAI_API_KEY=.*$|${key_line}|" "$target"
+        echo "Updated OPENAI_API_KEY in $target"
+    else
+        printf "\n# OpenAI API key for node-gpt-cli\n%s\n" "$key_line" >> "$target"
+        echo "Added OPENAI_API_KEY to $target"
+    fi
+
+    # Ensure readable permissions for profile.d when root
+    if [ "$(id -u)" -eq 0 ] && [ "$target" = "/etc/profile.d/node-gpt-cli.sh" ]; then
+        chmod 644 "$target"
+    fi
+elif [ "${SKIP_API_PROMPT:-0}" = "1" ]; then
     echo "Skipping OPENAI_API_KEY prompt (-y/SKIP_API_PROMPT provided)"
 else
     echo
