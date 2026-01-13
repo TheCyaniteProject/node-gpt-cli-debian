@@ -72,6 +72,16 @@ What the installer does:
 - Adds the `cli` directory to your PATH (system-wide via `/etc/profile.d` if run with sudo; otherwise in your shell profile)
 - Optionally saves `OPENAI_API_KEY` to your profile
 
+Non-interactive API key setup:
+
+```
+./installer/install.sh --api-key "sk-XXXX"   # or --api-key=sk-XXXX
+```
+
+Notes:
+- Use `-y` (or `SKIP_API_PROMPT=1`) to skip the API key prompt entirely.
+- `--api-key` sets and persists `OPENAI_API_KEY` without prompting.
+
 3) Reload your shell
 
 ```
@@ -129,6 +139,12 @@ API key in WSL:
 - Set it in WSL just like Linux: `export OPENAI_API_KEY="sk-..."` and persist in `~/.profile`.
 - Windows environment variables are not automatically imported into WSL shells. If your key is set in Windows, copy it into WSL and export it there.
 
+You can also set it non-interactively during install:
+
+```
+./installer/install.sh --api-key "sk-XXXX"
+```
+
 ## Configure your API key
 
 You can set it during installation, or later:
@@ -139,6 +155,7 @@ export OPENAI_API_KEY="sk-..."
 
 To persist it:
 - Add the export line to `~/.profile` (or `~/.bash_profile`), or rerun the installer to append it for you.
+- Or pass it directly to the installer: `./installer/install.sh --api-key "sk-XXXX"`.
 
 ## Quick start
 
